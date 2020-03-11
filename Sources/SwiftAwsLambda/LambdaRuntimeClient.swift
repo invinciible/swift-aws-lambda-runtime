@@ -12,7 +12,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-import Foundation // for JSON
 import Logging
 import NIO
 import NIOHTTP1
@@ -68,7 +67,7 @@ extension Lambda {
                 body = buffer
             case .failure(let error):
                 url += Consts.postErrorURLSuffix
-                let error = ErrorResponse(errorType: Consts.functionError, errorMessage: "\(error)")
+                let error = ErrorResponse(errorType: .FunctionError, errorMessage: "\(error)")
                 switch error.toJson() {
                 case .failure(let jsonError):
                     return self.eventLoop.makeFailedFuture(RuntimeError.json(jsonError))
@@ -98,7 +97,7 @@ extension Lambda {
         /// Reports an initialization error to the Runtime Engine.
         func reportInitializationError(logger: Logger, error: Error) -> EventLoopFuture<Void> {
             let url = Consts.postInitErrorURL
-            let errorResponse = ErrorResponse(errorType: Consts.initializationError, errorMessage: "\(error)")
+            let errorResponse = ErrorResponse(errorType: .InitializationError, errorMessage: "\(error)")
             var body: ByteBuffer
             switch errorResponse.toJson() {
             case .failure(let jsonError):
@@ -155,19 +154,59 @@ internal extension Lambda {
 }
 
 internal struct ErrorResponse: Codable {
-    var errorType: String
+    var errorType: ErrorType
     var errorMessage: String
+    
+    enum ErrorType: String, Codable {
+        case FunctionError
+        case InitializationError
+    }
 }
 
 private extension ErrorResponse {
     func toJson() -> Result<String, Error> {
-        let encoder = JSONEncoder()
-        do {
-            let data = try encoder.encode(self)
-            return .success(String(data: data, encoding: .utf8) ?? "unknown error")
-        } catch {
-            return .failure(error)
+        // hand coding the json string instead of using JSONEncoder as it is extremeley simple and can improve performance
+        return .success(String("{ \"errorType\": \"\(self.errorType)\", \"errorMessage\": \"\(self.errorMessage.jsonEscaped())\" }"))
+    }
+}
+
+private extension String {
+    func jsonEscaped() -> String {
+        var result: String = ""
+        let scalars = self.unicodeScalars
+        var start = self.startIndex
+        let end = self.endIndex
+        var idx = start
+        while idx < scalars.endIndex {
+            let s: String
+            let c = scalars[idx]
+            switch c {
+            case "\\": s = "\\\\"
+            case "\"": s = "\\\""
+            case "\n": s = "\\n"
+            case "\r": s = "\\r"
+            case "\t": s = "\\t"
+            case "\u{8}": s = "\\b"
+            case "\u{C}": s = "\\f"
+            case "\0"..<"\u{10}":
+                s = "\\u000\(String(c.value, radix: 16, uppercase: true))"
+            case "\u{10}"..<" ":
+                s = "\\u00\(String(c.value, radix: 16, uppercase: true))"
+            default:
+                idx = scalars.index(after: idx)
+                continue
+            }
+            if idx != start {
+                result.write(String(scalars[start..<idx]))
+            }
+            result.write(s)
+            idx = scalars.index(after: idx)
+            start = idx
         }
+        if start != end {
+            String(scalars[start..<end]).write(to: &result)
+        }
+        return result
     }
 }
 
